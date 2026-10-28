@@ -68,6 +68,7 @@ class _TapeItem:
     reverts: int
     editors: int
     mutual: bool
+    note: str
 
 
 class _Handle:
@@ -84,11 +85,13 @@ class _Handle:
             self.tape = [item for item in self.tape if item.day == day]
             known = {(item.wiki, item.title): item for item in self.tape}
             for war in wars:
+                note = _latest_note(war)
                 current = known.get((war.wiki, war.title))
                 if current is not None:
                     current.reverts = war.reverts
                     current.editors = war.distinct_reverters
                     current.mutual = war.mutual_war
+                    current.note = note
                     continue
                 item = _TapeItem(
                     day=day,
@@ -98,6 +101,7 @@ class _Handle:
                     reverts=war.reverts,
                     editors=war.distinct_reverters,
                     mutual=war.mutual_war,
+                    note=note,
                 )
                 self.tape.insert(0, item)
                 known[(war.wiki, war.title)] = item
@@ -145,6 +149,12 @@ def _status_line(state: AppState) -> str:
 
 def _safe(text: str) -> str:
     return html.escape(text, quote=True)
+
+
+def _latest_note(war: ArticleScore) -> str:
+    if not war.timeline:
+        return ""
+    return _note_text(war.timeline[-1])
 
 
 def _note_text(item: RevertEvent) -> str:
@@ -201,11 +211,13 @@ def _record_row(item: _TapeItem) -> str:
     sides = " Both sides." if item.mutual else ""
     editors = "1 editor" if item.editors == 1 else f"{item.editors} editors"
     body = f"{item.reverts} reverts by {editors}.{sides}"
+    note = f"<p class='note'>{_safe(item.note)}</p>" if item.note else ""
     return (
         "<div class='record-item'>"
         f"<span class='when'>{seen}</span> "
         f"<b>{_safe(item.title)}</b>"
         f"<div class='fight-meta'>{_safe(body)}</div>"
+        f"{note}"
         "</div>"
     )
 
@@ -223,7 +235,7 @@ def _record(items: list[_TapeItem]) -> None:
         )
         return
     rows = "".join(_record_row(item) for item in items)
-    seconds = max(48, len(items) * 8)
+    seconds = max(70, len(items) * 14)
     st.markdown(
         f"<div class='ticker-window'><div class='ticker-track' style='--crawl:{seconds}s'>"
         f"{rows}{rows}</div></div>",
