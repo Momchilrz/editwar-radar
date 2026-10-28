@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "editwar-radar"
+version = "0.1.0"
+description = "Live radar for Wikipedia edit wars."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.32,<1",
+  "sseclient-py>=1.8,<2",
+  "sqlalchemy>=2.0,<3",
+  "httpx>=0.27,<1",
+  "requests>=2.32,<3",
+  "pydantic-settings>=2.6,<3",
+  "streamlit>=1.39,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.8",
+  "mypy>=1.13",
+]
+
+[tool.setuptools]
+py-modules = ["config", "jsonutil"]
+
+[tool.setuptools.packages.find]
+include = ["detect*", "ingest*", "api*"]
+
+[tool.pytest.ini_options]
+testpaths = ["detect/tests", "ingest/tests", "api/tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["detect", "ingest", "api", "config.py", "jsonutil.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"api/main.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+packages = ["detect", "ingest", "api"]
+modules = ["config", "jsonutil"]
+exclude = [".*/tests/.*"]
+
+[[tool.mypy.overrides]]
+module = ["sseclient", "sseclient.*", "requests", "requests.*"]
+ignore_missing_imports = true

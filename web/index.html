@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Edit-War Radar</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect fill='%2312130f' width='32' height='32' rx='6'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%23ff5a36' stroke-width='1.4'/%3E%3Ccircle cx='16' cy='16' r='4' fill='none' stroke='%23f0b429' stroke-width='1.4'/%3E%3Ccircle cx='16' cy='16' r='1.6' fill='%23f4f1e6'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,650&family=IBM+Plex+Mono:wght@400;560&family=Outfit:wght@380;520;640&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <div class="brand">
+        <p class="eyebrow"><span class="mark" aria-hidden="true"></span> Wikipedia · live edit stream</p>
+        <h1>Edit-War Radar</h1>
+        <p class="lede">Revert battles igniting on Wikipedia, before they harden into news.</p>
+      </div>
+      <div class="meters" id="meters"></div>
+    </header>
+    <div id="banner" class="banner" hidden role="status"></div>
+    <div class="layout">
+      <section class="board-wrap">
+        <div class="section-head">
+          <h2>On the radar</h2>
+          <div id="filters" class="filters"></div>
+        </div>
+        <div id="board" class="board">
+          <noscript class="empty">Edit-War Radar needs JavaScript to stream the leaderboard.</noscript>
+        </div>
+      </section>
+      <aside class="side">
+        <section class="panel">
+          <div class="section-head">
+            <h2>War ignited</h2>
+          </div>
+          <div id="feed" class="feed" aria-live="polite"></div>
+        </section>
+        <section class="panel detail" id="detail" hidden></section>
+      </aside>
+    </div>
+    <footer class="foot">
+      <p>Score = 3×reverts + 2×editors + 6 if both sides revert each other. One revert is patrol. Two, inside <span id="window-hours">6</span> hours, is a war.</p>
+    </footer>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
