@@ -189,12 +189,25 @@ def _article(war: ArticleScore, index: int) -> None:
 def _section(title: str, note: str, wars: tuple[ArticleScore, ...], empty: str) -> None:
     st.markdown(f"<p class='col-title'>{_safe(title)}</p>", unsafe_allow_html=True)
     st.markdown(f"<p class='col-note'>{_safe(note)}</p>", unsafe_allow_html=True)
-    with st.container(height=560, border=False):
-        if not wars:
-            st.markdown(f"<p class='empty'>{_safe(empty)}</p>", unsafe_allow_html=True)
-            return
-        for index, war in enumerate(wars, start=1):
-            _article(war, index)
+    if not wars:
+        st.markdown(f"<p class='empty'>{_safe(empty)}</p>", unsafe_allow_html=True)
+        return
+    for index, war in enumerate(wars, start=1):
+        _article(war, index)
+
+
+def _record_row(item: _TapeItem) -> str:
+    seen = item.seen_at.astimezone(UTC).strftime("%H:%M")
+    sides = " Both sides." if item.mutual else ""
+    editors = "1 editor" if item.editors == 1 else f"{item.editors} editors"
+    body = f"{item.reverts} reverts by {editors}.{sides}"
+    return (
+        "<div class='record-item'>"
+        f"<span class='when'>{seen}</span> "
+        f"<b>{_safe(item.title)}</b>"
+        f"<div class='fight-meta'>{_safe(body)}</div>"
+        "</div>"
+    )
 
 
 def _record(items: list[_TapeItem]) -> None:
@@ -203,26 +216,19 @@ def _record(items: list[_TapeItem]) -> None:
         "<p class='col-note'>Fights that reached 4 reverts. They stay until midnight UTC.</p>",
         unsafe_allow_html=True,
     )
-    with st.container(height=560, border=False):
-        if not items:
-            st.markdown(
-                "<p class='empty'>Nothing filed yet. A line is added when a fight qualifies.</p>",
-                unsafe_allow_html=True,
-            )
-            return
-        for item in items:
-            seen = item.seen_at.astimezone(UTC).strftime("%H:%M")
-            sides = " Both sides." if item.mutual else ""
-            editors = "1 editor" if item.editors == 1 else f"{item.editors} editors"
-            body = f"{item.reverts} reverts by {editors}.{sides}"
-            st.markdown(
-                "<div class='record-item'>"
-                f"<span class='when'>{seen}</span> "
-                f"<b>{_safe(item.title)}</b>"
-                f"<div class='fight-meta'>{_safe(body)}</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
+    if not items:
+        st.markdown(
+            "<p class='empty'>Nothing filed yet. A line is added when a fight qualifies.</p>",
+            unsafe_allow_html=True,
+        )
+        return
+    rows = "".join(_record_row(item) for item in items)
+    seconds = max(48, len(items) * 8)
+    st.markdown(
+        f"<div class='ticker-window'><div class='ticker-track' style='--crawl:{seconds}s'>"
+        f"{rows}{rows}</div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _css() -> None:
@@ -230,16 +236,10 @@ def _css() -> None:
         """
         <style>
         header[data-testid="stHeader"], footer, #MainMenu { display: none; }
-        .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
-          height: 100vh;
-          overflow: hidden;
-          background: #f3f4f6;
-        }
+        .stApp { background: #f3f4f6; }
         [data-testid="stMainBlockContainer"] {
-          height: 100vh;
-          overflow: hidden;
           max-width: 100%;
-          padding: 0.85rem 1.1rem 0.4rem;
+          padding: 0.85rem 1.1rem 2rem;
         }
         [data-testid="stHeading"] h1 {
           font-family: Georgia, "Times New Roman", serif;
@@ -259,10 +259,11 @@ def _css() -> None:
         [data-testid="stColumn"] {
           background: #ffffff;
           border: 1px solid #a2a9b1;
-          padding: 0.55rem 0.7rem 0.3rem;
-          height: calc(100vh - 6.4rem);
-          overflow: hidden;
+          padding: 0.7rem 0.85rem 0.8rem;
+          max-height: calc(100vh - 7.5rem);
+          overflow-y: auto;
         }
+        [data-testid="stColumn"]:nth-child(3) { overflow: hidden; }
         .col-title {
           font-family: Georgia, "Times New Roman", serif;
           font-size: 1.25rem;
@@ -276,9 +277,36 @@ def _css() -> None:
           margin: 0.15rem 0 0.35rem;
           min-height: 2.1rem;
         }
-        [data-testid="stVerticalBlockBorderWrapper"] {
-          height: calc(100vh - 11.6rem) !important;
-          overflow-y: auto !important;
+        .ticker-window {
+          height: calc(100vh - 14rem);
+          overflow: hidden;
+          position: relative;
+        }
+        .ticker-track { animation: crawl var(--crawl, 70s) linear infinite; }
+        .ticker-window:hover .ticker-track { animation-play-state: paused; }
+        .ticker-window::before, .ticker-window::after {
+          content: "";
+          position: absolute;
+          left: 0;
+          right: 0;
+          height: 1.4rem;
+          z-index: 1;
+          pointer-events: none;
+        }
+        .ticker-window::before {
+          top: 0;
+          background: linear-gradient(#ffffff, transparent);
+        }
+        .ticker-window::after {
+          bottom: 0;
+          background: linear-gradient(transparent, #ffffff);
+        }
+        @keyframes crawl {
+          from { transform: translateY(0); }
+          to { transform: translateY(-50%); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .ticker-track { animation: none; }
         }
         .fight-title {
           font-family: Georgia, "Times New Roman", serif;
