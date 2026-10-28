@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import threading
 from dataclasses import dataclass
@@ -11,7 +12,8 @@ from datetime import UTC, datetime, timedelta
 import streamlit as st
 from config import get_settings, setup_logging
 from detect.engine import WarEngine
-from detect.models import ArticleScore
+from detect.models import ArticleScore, RevertEvent
+from detect.plain import plain_comment
 from detect.windows import (
     DAILY_MIN_REVERTS,
     FOUR_HOUR_MIN_REVERTS,
@@ -135,77 +137,163 @@ def _fight(war: ArticleScore) -> str:
 
 def _status_line(state: AppState) -> str:
     if not state.status.connected:
-        if state.status.last_error:
-            detail = state.status.last_error
-            return f"The Wikipedia stream is disconnected ({detail}). The lists stay up."
-        return "The Wikipedia stream is disconnected. The lists stay up."
+        return "Wikipedia stream paused. These lists are unchanged."
     if not state.caught_up:
-        return "Reading recent edits. The lists fill in as that backlog arrives."
-    return "Connected to the English Wikipedia edit stream."
+        return "Still reading today's edits."
+    return ""
+
+
+def _safe(text: str) -> str:
+    return html.escape(text, quote=True)
+
+
+def _note_text(item: RevertEvent) -> str:
+    cleaned = plain_comment(item.comment)
+    lead = f"{item.user} reverted {item.reverted_user}" if item.reverted_user else item.user
+    if not cleaned:
+        return lead + "."
+    if lead.casefold() in cleaned.casefold():
+        return cleaned
+    return cleaned
 
 
 def _article(war: ArticleScore, index: int) -> None:
-    st.markdown(f"**{index}.** {war.title}")
-    st.caption(_fight(war))
-    with st.expander("Revert comments"):
-        if not war.timeline:
-            st.caption("No revert comments in this block.")
-            return
-        for item in reversed(war.timeline[-8:]):
-            target = item.reverted_user or "an earlier edit"
-            when = item.timestamp.astimezone(UTC).strftime("%H:%M UTC")
-            st.markdown(f"**{when}** — {item.user} reverted {target}")
-            if item.comment:
-                st.text(item.comment)
-
-
-def _section(title: str, note: str, wars: tuple[ArticleScore, ...]) -> None:
-    st.subheader(title)
-    st.caption(note)
-    if not wars:
-        st.markdown(
-            "Nothing here yet. One or two reverts is ordinary cleanup, so it stays off this list."
-        )
-        return
-    for index, war in enumerate(wars, start=1):
-        _article(war, index)
-
-
-def _tape(items: list[_TapeItem]) -> None:
-    st.subheader("Signal tape")
-    st.caption(
-        "Once an article reaches 4 reverts in the 4-hour block, it stays here until midnight UTC."
+    title = _safe(war.title)
+    st.markdown(
+        f"<p class='fight-title'>{index}. {title}</p>"
+        f"<p class='fight-meta'>{_safe(_fight(war))}</p>",
+        unsafe_allow_html=True,
     )
-    if not items:
-        st.markdown("The tape is empty. A line is added when a fight qualifies, and it stays.")
+    notes = list(reversed(war.timeline[-6:]))
+    if not notes:
         return
-    rows = []
-    for item in items:
-        seen = item.seen_at.astimezone(UTC).strftime("%H:%M")
-        mutual = " Both sides." if item.mutual else ""
-        editors = "1 editor" if item.editors == 1 else f"{item.editors} editors"
-        rows.append(
-            f"<div class='tape-item'><b>{seen} UTC</b> · {item.title}<br>"
-            f"{item.reverts} reverts by {editors}.{mutual}</div>"
-        )
-    st.markdown("<div class='tape'>" + "".join(rows) + "</div>", unsafe_allow_html=True)
+    newest = notes[0]
+    when = newest.timestamp.astimezone(UTC).strftime("%H:%M")
+    st.markdown(
+        f"<p class='note'><span class='when'>{when}</span> {_safe(_note_text(newest))}</p>",
+        unsafe_allow_html=True,
+    )
+    older = notes[1:]
+    if not older:
+        return
+    label = "1 earlier edit" if len(older) == 1 else f"{len(older)} earlier edits"
+    with st.expander(label):
+        for item in older:
+            stamp = item.timestamp.astimezone(UTC).strftime("%H:%M")
+            st.markdown(
+                f"<p class='note'><span class='when'>{stamp}</span> {_safe(_note_text(item))}</p>",
+                unsafe_allow_html=True,
+            )
+
+
+def _section(title: str, note: str, wars: tuple[ArticleScore, ...], empty: str) -> None:
+    st.markdown(f"<p class='col-title'>{_safe(title)}</p>", unsafe_allow_html=True)
+    st.markdown(f"<p class='col-note'>{_safe(note)}</p>", unsafe_allow_html=True)
+    with st.container(height=560, border=False):
+        if not wars:
+            st.markdown(f"<p class='empty'>{_safe(empty)}</p>", unsafe_allow_html=True)
+            return
+        for index, war in enumerate(wars, start=1):
+            _article(war, index)
+
+
+def _record(items: list[_TapeItem]) -> None:
+    st.markdown("<p class='col-title'>On the record</p>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='col-note'>Fights that reached 4 reverts. They stay until midnight UTC.</p>",
+        unsafe_allow_html=True,
+    )
+    with st.container(height=560, border=False):
+        if not items:
+            st.markdown(
+                "<p class='empty'>Nothing filed yet. A line is added when a fight qualifies.</p>",
+                unsafe_allow_html=True,
+            )
+            return
+        for item in items:
+            seen = item.seen_at.astimezone(UTC).strftime("%H:%M")
+            sides = " Both sides." if item.mutual else ""
+            editors = "1 editor" if item.editors == 1 else f"{item.editors} editors"
+            body = f"{item.reverts} reverts by {editors}.{sides}"
+            st.markdown(
+                "<div class='record-item'>"
+                f"<span class='when'>{seen}</span> "
+                f"<b>{_safe(item.title)}</b>"
+                f"<div class='fight-meta'>{_safe(body)}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
 
 def _css() -> None:
     st.markdown(
         """
         <style>
-        .stApp { background: #f8f9fa; }
-        [data-testid="stAppViewContainer"] > .main { background: #ffffff; }
-        h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; font-weight: 400; }
-        h1 { border-bottom: 1px solid #a2a9b1; padding-bottom: 0.25rem; }
-        .tape {
-          max-height: 70vh;
-          overflow-y: auto;
-          border-left: 1px solid #a2a9b1;
-          padding-left: 0.8rem;
+        header[data-testid="stHeader"], footer, #MainMenu { display: none; }
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+          height: 100vh;
+          overflow: hidden;
+          background: #f3f4f6;
         }
-        .tape-item { padding: 0.55rem 0; border-bottom: 1px solid #eaecf0; line-height: 1.35; }
+        [data-testid="stMainBlockContainer"] {
+          height: 100vh;
+          overflow: hidden;
+          max-width: 100%;
+          padding: 0.85rem 1.1rem 0.4rem;
+        }
+        [data-testid="stHeading"] h1 {
+          font-family: Georgia, "Times New Roman", serif;
+          font-weight: 400;
+          font-size: 1.7rem;
+          margin: 0;
+          padding: 0;
+          line-height: 1.15;
+        }
+        .lede {
+          margin: 0.15rem 0 0.55rem;
+          color: #202122;
+          font-size: 0.95rem;
+          line-height: 1.35;
+        }
+        [data-testid="stHorizontalBlock"] { gap: 0.7rem; }
+        [data-testid="stColumn"] {
+          background: #ffffff;
+          border: 1px solid #a2a9b1;
+          padding: 0.55rem 0.7rem 0.3rem;
+          height: calc(100vh - 6.4rem);
+          overflow: hidden;
+        }
+        .col-title {
+          font-family: Georgia, "Times New Roman", serif;
+          font-size: 1.25rem;
+          margin: 0;
+          line-height: 1.2;
+        }
+        .col-note {
+          color: #54595d;
+          font-size: 0.82rem;
+          line-height: 1.3;
+          margin: 0.15rem 0 0.35rem;
+          min-height: 2.1rem;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] {
+          height: calc(100vh - 11.6rem) !important;
+          overflow-y: auto !important;
+        }
+        .fight-title {
+          font-family: Georgia, "Times New Roman", serif;
+          font-size: 1.05rem;
+          margin: 0.85rem 0 0.1rem;
+        }
+        .fight-meta, .empty { color: #202122; font-size: 0.88rem; margin: 0 0 0.2rem; }
+        .note { margin: 0.15rem 0 0.45rem; font-size: 0.9rem; line-height: 1.4; }
+        .when { color: #54595d; font-variant-numeric: tabular-nums; }
+        .record-item {
+          padding: 0.45rem 0;
+          border-bottom: 1px solid #eaecf0;
+          line-height: 1.35;
+        }
+        [data-testid="stExpander"] { margin-bottom: 0.2rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -226,24 +314,27 @@ def live_board() -> None:
             block_start, block_end, min_reverts=FOUR_HOUR_MIN_REVERTS, limit=20
         )
         tape = handle.note(recent.wars, now)
-        st.caption(_status_line(handle.state))
-        main, side = st.columns([2.1, 1], gap="large")
-        with main:
+        notice = _status_line(handle.state)
+        if notice:
+            st.caption(notice)
+        today, recent_col, record = st.columns(3, gap="small")
+        with today:
             _section(
                 "Today",
-                f"Since {_range_label(day_start, day_end)}. An article is listed only after "
-                f"{DAILY_MIN_REVERTS} reverts. Mutual fights are listed first.",
+                f"Since midnight UTC. Listed after {DAILY_MIN_REVERTS} reverts.",
                 daily.wars,
+                "No article has been fought over enough times today.",
             )
+        with recent_col:
             _section(
                 "Last four hours",
-                f"{_range_label(block_start, block_end)}. This block steps forward once an hour "
-                f"(at 20:00 it is 16:00–20:00; at 21:00 it is 17:00–21:00). "
-                f"An article needs {FOUR_HOUR_MIN_REVERTS} reverts to be listed.",
+                f"{_range_label(block_start, block_end)}. Moves forward on the hour. "
+                f"{FOUR_HOUR_MIN_REVERTS} reverts to be listed.",
                 recent.wars,
+                "No fight has reached 4 reverts in this block.",
             )
-        with side:
-            _tape(tape)
+        with record:
+            _record(tape)
     except Exception as exc:
         st.error("The lists could not refresh. The edit stream is still running in the background.")
         st.caption(str(exc))
@@ -251,15 +342,13 @@ def live_board() -> None:
 
 def main() -> None:
     _css()
-    st.title("Edit-War Radar")
+    st.markdown("# Edit-War Radar")
     st.markdown(
-        "Articles on English Wikipedia where editors are reverting each other. "
-        "A single revert is someone cleaning up vandalism. It is not listed. "
-        "A fight is listed only when the reverts keep coming."
+        "<p class='lede'>English Wikipedia articles editors keep reverting. "
+        "One revert is cleanup. It is not listed.</p>",
+        unsafe_allow_html=True,
     )
-    handle = radar()
-    if handle.state.settings.placeholder_contact:
-        st.caption("Set UA_CONTACT in the Streamlit secrets to a real email address.")
+    radar()
     live_board()
 
 
