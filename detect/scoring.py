@@ -72,11 +72,23 @@ class ArticleWindow:
 
     def snapshot(self, now: datetime) -> ArticleScore:
         self.expire(now)
-        timeline = tuple(sorted(self._reverts, key=lambda rev: rev.timestamp))
+        return self.score_slice(now - self._window)
+
+    def score_slice(self, start: datetime, end: datetime | None = None) -> ArticleScore:
+        """Score one clock range without deleting reverts stored outside it."""
+        timeline = tuple(
+            sorted(
+                (rev for rev in self._reverts if _in_range(rev.timestamp, start, end)),
+                key=lambda rev: rev.timestamp,
+            )
+        )
+        edits = sum(1 for ts in self._edit_times if _in_range(ts, start, end))
+        pairs = PairGraph()
+        for revert in timeline:
+            if revert.reverted_user is not None:
+                pairs.add(revert.user, revert.reverted_user, revert.timestamp)
         reverters = _reverter_names(timeline)
-        mutual = tuple(self._pairs.mutual_pairs())
-        directed = tuple(self._pairs.directed_counts())
-        participants = tuple(_participants(timeline))
+        mutual = tuple(pairs.mutual_pairs())
         reverts = len(timeline)
         distinct = len(reverters)
         mutual_count = len(mutual)
@@ -88,7 +100,7 @@ class ArticleWindow:
                 distinct_reverters=distinct,
                 mutual_pairs=mutual_count,
             ),
-            edits=len(self._edit_times),
+            edits=edits,
             reverts=reverts,
             distinct_reverters=distinct,
             mutual_pairs=mutual_count,
@@ -97,10 +109,16 @@ class ArticleWindow:
             war_started_at=timeline[0].timestamp if timeline else None,
             last_revert_at=timeline[-1].timestamp if timeline else None,
             timeline=timeline,
-            directed_pairs=directed,
+            directed_pairs=tuple(pairs.directed_counts()),
             mutual=mutual,
-            participants=participants,
+            participants=tuple(_participants(timeline)),
         )
+
+
+def _in_range(moment: datetime, start: datetime, end: datetime | None) -> bool:
+    if moment < start:
+        return False
+    return end is None or moment <= end
 
 
 def classify_revert(edit: IncomingEdit) -> tuple[bool, str | None, bool]:

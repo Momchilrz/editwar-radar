@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict, deque
 from datetime import UTC, datetime, timedelta
 
@@ -36,8 +37,13 @@ class WarEngine:
         self._seen: OrderedDict[str, datetime] = OrderedDict()
         self._feed: deque[FeedNotice] = deque(maxlen=40)
         self._history: dict[tuple[str, str], deque[ScorePoint]] = {}
+        self._lock = threading.RLock()
 
     def observe(self, edit: IncomingEdit, *, now: datetime | None = None) -> ObserveResult:
+        with self._lock:
+            return self._observe(edit, now=now)
+
+    def _observe(self, edit: IncomingEdit, *, now: datetime | None = None) -> ObserveResult:
         current = _require_aware(now) if now is not None else datetime.now(UTC)
         timestamp = _require_aware(edit.timestamp)
         if edit.event_id:
@@ -98,6 +104,16 @@ class WarEngine:
         wiki: str | None = None,
         limit: int | None = None,
     ) -> Leaderboard:
+        with self._lock:
+            return self._stored_board(now, wiki=wiki, limit=limit)
+
+    def _stored_board(
+        self,
+        now: datetime,
+        *,
+        wiki: str | None,
+        limit: int | None,
+    ) -> Leaderboard:
         current = _require_aware(now)
         wiki_key = wiki.lower() if wiki else None
         rows: list[ArticleScore] = []
@@ -114,17 +130,56 @@ class WarEngine:
             rows = rows[:limit]
         return Leaderboard(wars=tuple(rows), total=total)
 
+    def board(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        min_reverts: int,
+        wiki: str | None = None,
+        limit: int | None = None,
+    ) -> Leaderboard:
+        """Rank articles inside an explicit clock range. Does not change what is stored."""
+        with self._lock:
+            opened = _require_aware(start)
+            closed = _require_aware(end)
+            wiki_key = wiki.lower() if wiki else None
+            rows: list[ArticleScore] = []
+            for window in self._articles.values():
+                window.expire(closed)
+                if wiki_key is not None and window.wiki.lower() != wiki_key:
+                    continue
+                score = window.score_slice(opened, closed)
+                if score.reverts < min_reverts:
+                    continue
+                rows.append(score)
+            rows.sort(
+                key=lambda row: (
+                    not row.mutual_war,
+                    -row.reverts,
+                    -row.distinct_reverters,
+                    row.title.casefold(),
+                    row.wiki,
+                )
+            )
+            total = len(rows)
+            if limit is not None:
+                rows = rows[:limit]
+            return Leaderboard(wars=tuple(rows), total=total)
+
     def article(self, wiki: str, title: str, now: datetime) -> ArticleScore | None:
-        window = self._articles.get((wiki, title))
-        if window is None:
-            return None
-        score = window.snapshot(_require_aware(now))
-        if score.edits == 0 and score.reverts == 0:
-            return None
-        return score
+        with self._lock:
+            window = self._articles.get((wiki, title))
+            if window is None:
+                return None
+            score = window.snapshot(_require_aware(now))
+            if score.edits == 0 and score.reverts == 0:
+                return None
+            return score
 
     def feed(self) -> tuple[FeedNotice, ...]:
-        return tuple(reversed(self._feed))
+        with self._lock:
+            return tuple(reversed(self._feed))
 
     def history(self, wiki: str, title: str) -> tuple[ScorePoint, ...]:
         points = self._history.get((wiki, title))
@@ -134,6 +189,10 @@ class WarEngine:
 
     def record_scores(self, now: datetime) -> list[tuple[str, str, ScorePoint]]:
         """Append one score point for every article that is, or was, a war."""
+        with self._lock:
+            return self._record_scores(now)
+
+    def _record_scores(self, now: datetime) -> list[tuple[str, str, ScorePoint]]:
         current = _require_aware(now)
         saved: list[tuple[str, str, ScorePoint]] = []
         for key, window in list(self._articles.items()):
@@ -156,6 +215,10 @@ class WarEngine:
 
     def counts(self, now: datetime) -> tuple[int, int]:
         """Return ``(articles_in_window, wars)``."""
+        with self._lock:
+            return self._counts(now)
+
+    def _counts(self, now: datetime) -> tuple[int, int]:
         current = _require_aware(now)
         articles = 0
         wars = 0
@@ -169,6 +232,10 @@ class WarEngine:
         return articles, wars
 
     def prune(self, now: datetime) -> None:
+        with self._lock:
+            self._prune(now)
+
+    def _prune(self, now: datetime) -> None:
         current = _require_aware(now)
         cutoff = current - self.window
         empty: list[tuple[str, str]] = []

@@ -1,31 +1,34 @@
-"""Shareable Streamlit board. One process ingests Wikipedia and renders the wars."""
+"""Shareable board. Daily wars, a 4-hour block, and a tape that keeps what it has shown."""
 
 from __future__ import annotations
 
 import asyncio
 import os
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import streamlit as st
-from api.present import war_detail, wars_response
-from api.schemas import WarDetailOut, WarsResponse
 from config import get_settings, setup_logging
+from detect.engine import WarEngine
+from detect.models import ArticleScore
+from detect.windows import (
+    DAILY_MIN_REVERTS,
+    FOUR_HOUR_MIN_REVERTS,
+    clock_four_hours,
+    utc_today,
+)
 from ingest.runtime import score_loop, status_loop, views_loop
 from ingest.state import AppState, build_state, initial_since, replay
 
-st.set_page_config(
-    page_title="Edit-War Radar",
-    page_icon="📡",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+_RETAIN = timedelta(hours=26)
+
+st.set_page_config(page_title="Edit-War Radar", layout="wide")
 
 
 def _export_secrets() -> None:
-    """Streamlit Cloud secrets become env vars before settings are read."""
     try:
-        secrets = st.secrets
+        secrets = dict(st.secrets)
     except Exception:
         return
     for key, value in secrets.items():
@@ -54,132 +57,209 @@ def _ingest(state: AppState) -> None:
     asyncio.run(_run())
 
 
+@dataclass
+class _TapeItem:
+    day: str
+    wiki: str
+    title: str
+    seen_at: datetime
+    reverts: int
+    editors: int
+    mutual: bool
+
+
+class _Handle:
+    def __init__(self, state: AppState) -> None:
+        self.state = state
+        self.tape: list[_TapeItem] = []
+        self._lock = threading.Lock()
+
+    def note(
+        self, wars: tuple[ArticleScore, ...] | list[ArticleScore], now: datetime
+    ) -> list[_TapeItem]:
+        day = now.astimezone(UTC).date().isoformat()
+        with self._lock:
+            self.tape = [item for item in self.tape if item.day == day]
+            known = {(item.wiki, item.title): item for item in self.tape}
+            for war in wars:
+                current = known.get((war.wiki, war.title))
+                if current is not None:
+                    current.reverts = war.reverts
+                    current.editors = war.distinct_reverters
+                    current.mutual = war.mutual_war
+                    continue
+                item = _TapeItem(
+                    day=day,
+                    wiki=war.wiki,
+                    title=war.title,
+                    seen_at=now,
+                    reverts=war.reverts,
+                    editors=war.distinct_reverters,
+                    mutual=war.mutual_war,
+                )
+                self.tape.insert(0, item)
+                known[(war.wiki, war.title)] = item
+            return list(self.tape)
+
+
 @st.cache_resource
-def radar() -> AppState:
+def radar() -> _Handle:
     _export_secrets()
     get_settings.cache_clear()
-    state = build_state(get_settings())
+    settings = get_settings()
+    engine = WarEngine(
+        _RETAIN,
+        min_reverts=FOUR_HOUR_MIN_REVERTS,
+        skip_minor=settings.skip_minor,
+    )
+    state = build_state(settings, engine=engine)
     threading.Thread(target=_ingest, args=(state,), name="editwar-streamlit", daemon=True).start()
-    return state
+    return _Handle(state)
 
 
-def _ago(moment: datetime | None) -> str:
-    if moment is None:
-        return ""
-    current = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
-    seconds = int((datetime.now(UTC) - current.astimezone(UTC)).total_seconds())
-    if seconds < 60:
-        return "just now"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m ago"
-    hours, rem = divmod(minutes, 60)
-    if hours < 36:
-        return f"{hours}h {rem}m ago" if rem else f"{hours}h ago"
-    return f"{hours // 24}d ago"
+def _clock(moment: datetime) -> str:
+    return moment.astimezone(UTC).strftime("%H:%M")
 
 
-def _status(board: WarsResponse) -> None:
-    if not board.stream_connected:
-        message = "Wikipedia stream disconnected. Showing the last window we have."
-        if board.last_error:
-            message = f"{message} ({board.last_error})"
-        st.warning(message)
+def _range_label(start: datetime, end: datetime) -> str:
+    return f"{_clock(start)}–{_clock(end)} UTC"
+
+
+def _fight(war: ArticleScore) -> str:
+    editors = "1 editor" if war.distinct_reverters == 1 else f"{war.distinct_reverters} editors"
+    line = f"{war.reverts} reverts by {editors}"
+    if war.mutual_war:
+        return f"{line}. Both sides have reverted each other."
+    return f"{line}. Only one side is reverting so far."
+
+
+def _status_line(state: AppState) -> str:
+    if not state.status.connected:
+        if state.status.last_error:
+            detail = state.status.last_error
+            return f"The Wikipedia stream is disconnected ({detail}). The lists stay up."
+        return "The Wikipedia stream is disconnected. The lists stay up."
+    if not state.caught_up:
+        return "Reading recent edits. The lists fill in as that backlog arrives."
+    return "Connected to the English Wikipedia edit stream."
+
+
+def _article(war: ArticleScore, index: int) -> None:
+    st.markdown(f"**{index}.** {war.title}")
+    st.caption(_fight(war))
+    with st.expander("Revert comments"):
+        if not war.timeline:
+            st.caption("No revert comments in this block.")
+            return
+        for item in reversed(war.timeline[-8:]):
+            target = item.reverted_user or "an earlier edit"
+            when = item.timestamp.astimezone(UTC).strftime("%H:%M UTC")
+            st.markdown(f"**{when}** — {item.user} reverted {target}")
+            if item.comment:
+                st.text(item.comment)
+
+
+def _section(title: str, note: str, wars: tuple[ArticleScore, ...]) -> None:
+    st.subheader(title)
+    st.caption(note)
+    if not wars:
+        st.markdown(
+            "Nothing here yet. One or two reverts is ordinary cleanup, so it stays off this list."
+        )
         return
-    if not board.caught_up:
-        st.info("Replaying recent edits into the 6 hour window.")
+    for index, war in enumerate(wars, start=1):
+        _article(war, index)
+
+
+def _tape(items: list[_TapeItem]) -> None:
+    st.subheader("Signal tape")
+    st.caption(
+        "Once an article reaches 4 reverts in the 4-hour block, it stays here until midnight UTC."
+    )
+    if not items:
+        st.markdown("The tape is empty. A line is added when a fight qualifies, and it stays.")
         return
-    st.success(
-        f"Live · {board.edits_per_minute} edits/min · {board.reverts_seen} reverts kept · "
-        f"{board.total} wars"
+    rows = []
+    for item in items:
+        seen = item.seen_at.astimezone(UTC).strftime("%H:%M")
+        mutual = " Both sides." if item.mutual else ""
+        editors = "1 editor" if item.editors == 1 else f"{item.editors} editors"
+        rows.append(
+            f"<div class='tape-item'><b>{seen} UTC</b> · {item.title}<br>"
+            f"{item.reverts} reverts by {editors}.{mutual}</div>"
+        )
+    st.markdown("<div class='tape'>" + "".join(rows) + "</div>", unsafe_allow_html=True)
+
+
+def _css() -> None:
+    st.markdown(
+        """
+        <style>
+        .stApp { background: #f8f9fa; }
+        [data-testid="stAppViewContainer"] > .main { background: #ffffff; }
+        h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; font-weight: 400; }
+        h1 { border-bottom: 1px solid #a2a9b1; padding-bottom: 0.25rem; }
+        .tape {
+          max-height: 70vh;
+          overflow-y: auto;
+          border-left: 1px solid #a2a9b1;
+          padding-left: 0.8rem;
+        }
+        .tape-item { padding: 0.55rem 0; border-bottom: 1px solid #eaecf0; line-height: 1.35; }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
 
-def _detail(state: AppState, wiki: str, title: str) -> None:
-    detail: WarDetailOut | None = war_detail(state, wiki, title)
-    if detail is None:
-        st.caption("That article has fallen out of the window.")
-        return
-    st.subheader(detail.title)
-    bits = [
-        f"score {detail.score}",
-        f"{detail.reverts} reverts",
-        f"{detail.distinct_reverters} editors",
-    ]
-    if detail.mutual_war:
-        bits.append("mutual")
-    st.caption(" · ".join(bits))
-    if detail.url:
-        st.link_button("Open on Wikipedia", detail.url)
-    if detail.mutual:
-        st.write(" · ".join(f"{pair.a} ⇄ {pair.b}" for pair in detail.mutual))
-    for person in detail.participants:
-        st.caption(f"{person.name} · {person.reverts_made} sent / {person.times_reverted} received")
-    for item in detail.timeline:
-        who = item.reverted_user or "an unnamed edit"
-        st.markdown(f"**{_ago(item.timestamp)}** {item.user} reverted {who}")
-        if item.comment:
-            st.text(item.comment)
-
-
-@st.fragment(run_every=timedelta(seconds=15))
+@st.fragment(run_every=timedelta(seconds=60))
 def live_board() -> None:
-    state = radar()
-    board = wars_response(state, limit=25, wiki=None)
-    _status(board)
-    left, right = st.columns([1.4, 1], gap="large")
-    with left:
-        st.header("On the radar")
-        if not board.wars:
-            st.caption(
-                "Listening. English Wikipedia usually puts at least one article "
-                "over two reverts within an hour."
+    try:
+        handle = radar()
+        now = datetime.now(UTC)
+        day_start, day_end = utc_today(now)
+        block_start, block_end = clock_four_hours(now)
+        daily = handle.state.engine.board(
+            day_start, day_end, min_reverts=DAILY_MIN_REVERTS, limit=20
+        )
+        recent = handle.state.engine.board(
+            block_start, block_end, min_reverts=FOUR_HOUR_MIN_REVERTS, limit=20
+        )
+        tape = handle.note(recent.wars, now)
+        st.caption(_status_line(handle.state))
+        main, side = st.columns([2.1, 1], gap="large")
+        with main:
+            _section(
+                "Today",
+                f"Since {_range_label(day_start, day_end)}. An article is listed only after "
+                f"{DAILY_MIN_REVERTS} reverts. Mutual fights are listed first.",
+                daily.wars,
             )
-        else:
-            top = max(war.score for war in board.wars)
-            for index, war in enumerate(board.wars, start=1):
-                label = f"{index:02d}   {war.score}   {war.title}"
-                if st.button(label, key=f"war-{war.wiki}-{war.title}", use_container_width=True):
-                    st.session_state["selected"] = (war.wiki, war.title)
-                meta = (
-                    f"{war.reverts} reverts · {war.distinct_reverters} editors · "
-                    f"{_ago(war.war_started_at)}"
-                )
-                if war.mutual_war:
-                    meta = f"{meta} · mutual"
-                if war.reverters:
-                    meta = f"{meta} · {', '.join(war.reverters[:4])}"
-                st.caption(meta)
-                st.progress(war.score / top)
-    with right:
-        st.header("War ignited")
-        if not board.ignitions:
-            st.caption("No ignition yet. An article joins this list at the second revert.")
-        for notice in board.ignitions[:12]:
-            kind = "Mutual" if notice.kind == "mutual" else "War ignited"
-            if st.button(
-                f"{kind} · {notice.title}",
-                key=f"feed-{notice.id}",
-                use_container_width=True,
-            ):
-                st.session_state["selected"] = (notice.wiki, notice.title)
-            st.caption(f"{_ago(notice.at)} · {notice.reverts} reverts")
-        selected = st.session_state.get("selected")
-        if isinstance(selected, tuple) and len(selected) == 2:
-            st.divider()
-            _detail(state, str(selected[0]), str(selected[1]))
+            _section(
+                "Last four hours",
+                f"{_range_label(block_start, block_end)}. This block steps forward once an hour "
+                f"(at 20:00 it is 16:00–20:00; at 21:00 it is 17:00–21:00). "
+                f"An article needs {FOUR_HOUR_MIN_REVERTS} reverts to be listed.",
+                recent.wars,
+            )
+        with side:
+            _tape(tape)
+    except Exception as exc:
+        st.error("The lists could not refresh. The edit stream is still running in the background.")
+        st.caption(str(exc))
 
 
 def main() -> None:
+    _css()
     st.title("Edit-War Radar")
-    st.caption("Revert battles on English Wikipedia, before they harden into news.")
-    state = radar()
-    if state.settings.placeholder_contact:
-        st.sidebar.warning("Set UA_CONTACT in Streamlit secrets to a real email address.")
-    st.sidebar.caption(
-        "Score = 3×reverts + 2×editors + 6 if both sides revert each other. "
-        "Two reverts inside 6 hours is a war."
+    st.markdown(
+        "Articles on English Wikipedia where editors are reverting each other. "
+        "A single revert is someone cleaning up vandalism. It is not listed. "
+        "A fight is listed only when the reverts keep coming."
     )
+    handle = radar()
+    if handle.state.settings.placeholder_contact:
+        st.caption("Set UA_CONTACT in the Streamlit secrets to a real email address.")
     live_board()
 
 

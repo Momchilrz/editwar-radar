@@ -39,7 +39,9 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-That opens a local board on port 8501. To put it on the internet for free:
+That opens a local board on port 8501. The page has two lists, not a live feed of every revert: **Today** (6 or more reverts since midnight UTC) and **Last four hours** (4 or more). The four-hour block steps forward once an hour. A tape on the right keeps every article that qualified, until midnight UTC.
+
+To put it on the internet for free:
 
 1. This repo is on GitHub.
 2. Sign in at https://share.streamlit.io with the same GitHub account.
